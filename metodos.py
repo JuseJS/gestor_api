@@ -1,11 +1,44 @@
+# Jose Antonio Navarro Perez
+
 import psycopg2
 import datetime
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-### Jose Antonio Navarro Perez
 
+### Helper Functions ###
+def handle_response(data, status_code=200):
+    """
+    Helper function to handle HTTP responses.
+    Handles both successful responses and errors.
+    """
+    if isinstance(data, tuple) and len(data) == 2:
+        return jsonify(data[0]), data[1]
+
+    if status_code >= 400:  # It's an error
+        return jsonify({"error": str(data)}), status_code
+
+    return jsonify(data), status_code
+
+
+def handle_request(required_fields=None):
+    """
+    Helper function to validate required fields in the request.
+    Returns a dictionary with the validated fields or raises an exception.
+    """
+    try:
+        body = request.json
+        if required_fields:
+            missing_fields = [field for field in required_fields if field not in body]
+            if missing_fields:
+                raise KeyError(f"Missing required fields: {', '.join(missing_fields)}")
+        return body
+    except Exception as e:
+        raise KeyError(str(e))
+
+
+### Database Connection Function ###
 def ejecutar_sql(sql_text, params=None):
     host = "localhost"
     port = "5432"
@@ -29,39 +62,37 @@ def ejecutar_sql(sql_text, params=None):
         else:
             cursor.execute(sql_text)
 
-        # Si la consulta no devuelve resultados (como un INSERT)
         if cursor.description is None:
             connection.commit()
             cursor.close()
             connection.close()
             return None
 
-        # Para consultas SELECT
-        columnas = [desc[0] for desc in cursor.description]
-        resultados = cursor.fetchall()
-        datos = [dict(zip(columnas, fila)) for fila in resultados]
+        columns = [desc[0] for desc in cursor.description]
+        results = cursor.fetchall()
+        data = [dict(zip(columns, row)) for row in results]
 
         cursor.close()
         connection.close()
 
-        return datos
+        return data
 
     except psycopg2.Error as e:
         print("Error:", e)
         return {"error": str(e)}, 500
 
-# Ruta de prueba
-@app.route('/api/test', methods=['GET'])
-def hola_mundo():
-    return jsonify({"msg": "Hola, mundo!"})
 
-# Rutas de autenticación
+### Test Route ###
+@app.route('/api/test', methods=['GET'])
+def hello_world():
+    return handle_response({"msg": "Hello, world!"})
+
+
+### Authentication Routes ###
 @app.route('/api/auth/login', methods=['POST'])
-def gestor_login():
+def manager_login():
     try:
-        body_request = request.json
-        user = body_request["user"]
-        passwd = body_request["passwd"]
+        body = handle_request(required_fields=["user", "passwd"])
 
         query = """
             SELECT g.id, g.usuario, e.nombre
@@ -70,112 +101,145 @@ def gestor_login():
             WHERE g.usuario = %s 
             AND g.passwd = %s
         """
-        resultado = ejecutar_sql(query, (user, passwd))
+        result = ejecutar_sql(query, (body["user"], body["passwd"]))
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
+        if not result:
+            return handle_response("Invalid credentials", 401)
 
-        if not resultado:
-            return jsonify({"error": "Credenciales inválidas"}), 401
-
-        return jsonify({
-            "id": resultado[0]['id'],
-            "usuario": resultado[0]['usuario'],
-            "nombre": resultado[0]['nombre']
+        return handle_response({
+            "id": result[0]['id'],
+            "user": result[0]['usuario'],
+            "name": result[0]['nombre'],
+            "role": "Gestor"
         })
+    except KeyError as e:
+        return handle_response(str(e), 400)
 
-    except KeyError:
-        return jsonify({"error": "JSON inválido"}), 400
 
-# Rutas de empleados
+### Employee Routes ###
 @app.route('/api/empleados', methods=['GET'])
-def obtener_empleados():
+def get_employees():
     query = """
         SELECT e.nombre,
         CASE 
             WHEN g.id IS NOT NULL THEN 'Gestor'
             WHEN p.id IS NOT NULL THEN 'Programador'
-        END as empleado
+        END as employee_type
         FROM public."Empleado" e
         LEFT JOIN public."Gestor" g ON e.id = g.empleado
         LEFT JOIN public."Programador" p ON e.id = p.empleado
     """
-    resultado = ejecutar_sql(query)
-    if isinstance(resultado, tuple):
-        return jsonify(resultado[0]), resultado[1]
-    return jsonify(resultado)
+    result = ejecutar_sql(query)
+    return handle_response(result)
+
 
 @app.route('/api/programadores', methods=['GET'])
-def obtener_programadores():
+def get_programmers():
     query = """
-        SELECT p.*, e.email, e.nombre
+        SELECT p.id, e.nombre
         FROM public."Programador" p
         JOIN public."Empleado" e ON p.empleado = e.id
     """
-    resultado = ejecutar_sql(query)
-    if isinstance(resultado, tuple):
-        return jsonify(resultado[0]), resultado[1]
-    return jsonify(resultado)
+    result = ejecutar_sql(query)
+    return handle_response(result)
 
-# Rutas de proyectos
-@app.route('/api/proyectos', methods=['GET'])
-def obtener_proyectos():
+
+### Project Routes ###
+# Project Retrieval Routes
+@app.route('/api/proyectos/finalizados', methods=['GET'])
+def get_projects():
     query = """
-        SELECT p.*, c.nombre_empresa as cliente_nombre
+        SELECT p.*
         FROM public."Proyecto" p
-        JOIN public."Cliente" c ON p.cliente = c.id
+        WHERE p.fecha_finalizacion < CURRENT_TIMESTAMP
+        AND p.fecha_finalizacion IS NOT NULL
     """
-    resultado = ejecutar_sql(query)
-    if isinstance(resultado, tuple):
-        return jsonify(resultado[0]), resultado[1]
-    return jsonify(resultado)
+    result = ejecutar_sql(query)
+    return handle_response(result)
+
 
 @app.route('/api/proyectos/activos', methods=['GET'])
-def obtener_proyectos_activos():
+def get_active_projects():
     query = """
-        SELECT p.id, p.nombre, p.descripcion, p.fecha_creacion, p.fecha_inicio, c.nombre_empresa as cliente
+        SELECT p.id, p.nombre, p.descripcion, p.fecha_creacion, p.fecha_inicio, p.cliente
         FROM public."Proyecto" p
-        JOIN public."Cliente" c ON p.cliente = c.id
         WHERE p.fecha_finalizacion > CURRENT_TIMESTAMP
         or p.fecha_finalizacion IS NULL
     """
-    resultado = ejecutar_sql(query)
-    if isinstance(resultado, tuple):
-        return jsonify(resultado[0]), resultado[1]
-    return jsonify(resultado)
+    result = ejecutar_sql(query)
+    print(result)
+    return handle_response(result)
 
-@app.route('/api/proyectos/gestor', methods=['GET'])
-def obtener_proyectos_por_gestor():
+
+@app.route('/api/proyectos/gestor/activos', methods=['POST'])
+def get_active_projects_by_manager():
     try:
-        body_request = request.json
-        gestor_id = body_request["id"]
+        body = handle_request(required_fields=["id"])
 
         query = """
-                SELECT p.* 
+                SELECT p.id, p.nombre, p.descripcion, p.fecha_creacion, p.fecha_inicio, p.cliente
                 FROM public."Proyecto" p
                 JOIN public."GestoresProyecto" gp ON p.id = gp.proyecto
-                WHERE gp.gestor = %s
+                WHERE p.fecha_finalizacion > CURRENT_TIMESTAMP
+                OR p.fecha_finalizacion IS NULL
+                AND gp.gestor = %s
             """
-        resultado = ejecutar_sql(query, (gestor_id,))
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-        return jsonify(resultado)
+        result = ejecutar_sql(query, (body["id"],))
+        print(result)
+        return handle_response(result)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al obtener las tareas: {str(e)}"}), 500
+        return handle_response(f"Error fetching projects: {str(e)}", 500)
 
-@app.route('/api/proyectos/crear', methods=['POST'])
-def crear_proyecto():
+
+@app.route('/api/proyectos/gestor/finalizados', methods=['POST'])
+def get_ended_projects_by_manager():
     try:
-        body_request = request.json
-        nombre = body_request["nombre"]
-        descripcion = body_request["descripcion"]
-        fecha_inicio = body_request["fecha_inicio"]
-        cliente = body_request["cliente"]
+        body = handle_request(required_fields=["id"])
 
-        fecha_creacion = datetime.datetime.now()
+        query = """
+                SELECT p.*
+                FROM public."Proyecto" p
+                JOIN public."GestoresProyecto" gp ON p.id = gp.proyecto
+                WHERE p.fecha_finalizacion < CURRENT_TIMESTAMP
+                AND p.fecha_finalizacion IS NOT NULL
+                AND gp.gestor = %s
+            """
+        result = ejecutar_sql(query, (body["id"],))
+        print(result)
+        return handle_response(result)
+
+    except KeyError as e:
+        return handle_response(str(e), 400)
+    except Exception as e:
+        return handle_response(f"Error fetching projects: {str(e)}", 500)
+
+
+@app.route('/api/proyectos/<int:proyecto_id>/obtener-programadores', methods=['GET'])
+def get_project_assigned_programmers(proyecto_id):
+    try:
+        query = """
+            SELECT p.id, e.nombre
+            FROM public."ProgramadoresProyecto" pp
+            JOIN public."Programador" p ON pp.programador = p.id
+            JOIN public."Empleado" e ON p.empleado = e.id
+            WHERE pp.proyecto = %s
+        """
+        result = ejecutar_sql(query, (proyecto_id,))
+        return handle_response(result)
+
+    except Exception as e:
+        return handle_response(f"Error: {str(e)}", 500)
+
+
+# Project Management Routes
+@app.route('/api/proyectos/crear', methods=['POST'])
+def create_project():
+    try:
+        body = handle_request(required_fields=["name", "description", "startDate", "client"])
+        creation_date = datetime.datetime.now()
 
         query = """
             INSERT INTO public."Proyecto"
@@ -183,38 +247,34 @@ def crear_proyecto():
             VALUES (%s, %s, %s, %s, %s);
         """
 
-        resultado = ejecutar_sql(query, (
-            nombre,
-            descripcion,
-            fecha_creacion,
-            fecha_inicio,
-            cliente
+        result = ejecutar_sql(query, (
+            body["name"],
+            body["description"],
+            creation_date,
+            body["startDate"],
+            body["client"]
         ))
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-
-        return jsonify({
-            "nombre": nombre,
-            "descripcion": descripcion,
-            "fecha_creacion": fecha_creacion.isoformat(),
-            "fecha_inicio": fecha_inicio,
-            "cliente": cliente
-        }), 201
+        return handle_response({
+            "name": body["name"],
+            "description": body["description"],
+            "creation_date": creation_date.isoformat(),
+            "start_date": body["startDate"],
+            "client": body["client"]
+        }, 201)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al crear el proyecto: {str(e)}"}), 500
+        return handle_response(f"Error creating project: {str(e)}", 500)
 
+
+# Project Assignment Routes
 @app.route('/api/proyectos/asignar-gestor', methods=['POST'])
-def asignar_gestor_proyecto():
+def assign_manager_to_project():
     try:
-        body_request = request.json
-        gestor = body_request["gestor"]
-        proyecto = body_request["proyecto"]
-
-        fecha_asignacion = datetime.datetime.now()
+        body = handle_request(required_fields=["gestor", "proyecto"])
+        assignment_date = datetime.datetime.now()
 
         query = """
             INSERT INTO public."GestoresProyecto"
@@ -222,34 +282,29 @@ def asignar_gestor_proyecto():
             VALUES (%s, %s, %s);
         """
 
-        resultado = ejecutar_sql(query, (
-            gestor,
-            proyecto,
-            fecha_asignacion
+        result = ejecutar_sql(query, (
+            body["gestor"],
+            body["proyecto"],
+            assignment_date
         ))
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-
-        return jsonify({
-            "gestor": gestor,
-            "proyecto": proyecto,
-            "fecha_asignacion": fecha_asignacion.isoformat()
-        }), 201
+        return handle_response({
+            "manager": body["gestor"],
+            "project": body["proyecto"],
+            "assignment_date": assignment_date.isoformat()
+        }, 201)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al asignar el gestor al proyecto: {str(e)}"}), 500
+        return handle_response(f"Error assigning manager to project: {str(e)}", 500)
+
 
 @app.route('/api/proyectos/asignar-programador', methods=['POST'])
-def asignar_programador_proyecto():
+def assign_programmer_to_project():
     try:
-        body_request = request.json
-        programador = body_request["programador"]
-        proyecto = body_request["proyecto"]
-
-        fecha_asignacion = datetime.datetime.now()
+        body = handle_request(required_fields=["programador", "proyecto"])
+        assignment_date = datetime.datetime.now()
 
         query = """
             INSERT INTO public."ProgramadoresProyecto"
@@ -257,32 +312,28 @@ def asignar_programador_proyecto():
             VALUES (%s, %s, %s);
         """
 
-        resultado = ejecutar_sql(query, (
-            programador,
-            proyecto,
-            fecha_asignacion
+        result = ejecutar_sql(query, (
+            body["programador"],
+            body["proyecto"],
+            assignment_date
         ))
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-
-        return jsonify({
-            "programador": programador,
-            "proyecto": proyecto,
-            "fecha_asignacion": fecha_asignacion.isoformat()
-        }), 201
+        return handle_response({
+            "programmer": body["programador"],
+            "project": body["proyecto"],
+            "assignment_date": assignment_date.isoformat()
+        }, 201)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al asignar el programador al proyecto: {str(e)}"}), 500
+        return handle_response(f"Error assigning programmer to project: {str(e)}", 500)
+
 
 @app.route('/api/proyectos/modificar-cliente', methods=['POST'])
-def modificar_cliente_proyecto():
+def update_project_client():
     try:
-        body_request = request.json
-        cliente = body_request["cliente"]
-        proyecto = body_request["proyecto"]
+        body = handle_request(required_fields=["cliente", "proyecto"])
 
         query = """
                 UPDATE public."Proyecto"
@@ -290,91 +341,83 @@ def modificar_cliente_proyecto():
                 WHERE id = %s;
         """
 
-        resultado = ejecutar_sql(query, (
-            cliente,
-            proyecto
+        result = ejecutar_sql(query, (
+            body["cliente"],
+            body["proyecto"]
         ))
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-
-        return jsonify({
-            "cliente": cliente,
-            "proyecto": proyecto
-        }), 200
+        return handle_response({
+            "client": body["cliente"],
+            "project": body["proyecto"]
+        }, 200)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al modificar el cliente del proyecto: {str(e)}"}), 500
+        return handle_response(f"Error updating project client: {str(e)}", 500)
 
-# Rutas de tareas
+
+### Task Routes ###
+# Task Creation and Assignment
 @app.route('/api/tareas/crear', methods=['POST'])
-def crear_tarea():
+def create_task():
     try:
-        body_request = request.json
-        gestor = body_request["gestor"]
-        nombre = body_request["nombre"]
-        descripcion = body_request["descripcion"]
-        estimacion = body_request["estimacion"]
-        proyecto = body_request["proyecto"]
+        body = handle_request(required_fields=["gestor", "nombre", "descripcion", "estimacion", "proyecto"])
+        creation_date = datetime.datetime.now()
 
-        fecha_creacion = datetime.datetime.now()
-
-        query_comprobar_gestor = """
-                SELECT *
-                FROM public."GestoresProyecto"
-                WHERE proyecto = %s 
-                AND gestor = %s;
+        query_check_manager = """
+            SELECT *
+            FROM public."GestoresProyecto"
+            WHERE proyecto = %s 
+            AND gestor = %s;
         """
-
-        resultado_comprobar_gestor = ejecutar_sql(query_comprobar_gestor, (
-            proyecto,
-            gestor
+        result_check_manager = ejecutar_sql(query_check_manager, (
+            body["proyecto"],
+            body["gestor"]
         ))
 
-        if not resultado_comprobar_gestor:
-            return jsonify({"error": f"No estas asignado como gestor a este proyecto."}), 400
-
-        if isinstance(resultado_comprobar_gestor, tuple):
-            return jsonify(resultado_comprobar_gestor[0]), resultado_comprobar_gestor[1]
+        if not result_check_manager:
+            return handle_response("You are not assigned as a manager to this project.", 400)
 
         query = """
-                    INSERT INTO public."Tarea"
-                    (nombre, descripcion, estimacion, fecha_creacion, proyecto)
-                    VALUES (%s, %s, %s, %s, %s);
-                """
+            INSERT INTO public."Tarea"
+            (nombre, descripcion, estimacion, fecha_creacion, proyecto, programador)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
 
-        resultado = ejecutar_sql(query, (
-            nombre,
-            descripcion,
-            estimacion,
-            fecha_creacion,
-            proyecto
-        ))
+        params = (
+            body["nombre"],
+            body["descripcion"],
+            body["estimacion"],
+            creation_date,
+            body["proyecto"],
+            body.get("programador")
+        )
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
+        result = ejecutar_sql(query, params)
 
-        return jsonify({
-            "nombre": nombre,
-            "descripcion": descripcion,
-            "estimacion": estimacion,
-            "fecha_creacion": fecha_creacion.isoformat(),
-            "proyecto": proyecto
-        }), 201
+        response_data = {
+            "id": result[0]["id"] if result else None,
+            "nombre": body["nombre"],
+            "descripcion": body["descripcion"],
+            "estimacion": body["estimacion"],
+            "fecha_creacion": creation_date.isoformat(),
+            "proyecto": body["proyecto"],
+            "programador": body.get("programador")
+        }
+
+        return handle_response(response_data, 201)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al añadir tarea al proyecto: {str(e)}"}), 500
+        return handle_response(f"Error adding task to project: {str(e)}", 500)
+
 
 @app.route('/api/tareas/asignar-programador', methods=['POST'])
-def asignar_programador_tarea():
+def assign_programmer_to_task():
     try:
-        body_request = request.json
-        programador = body_request["programador"]
-        tarea = body_request["tarea"]
+        body = handle_request(required_fields=["programador", "tarea"])
 
         query = """
             UPDATE public."Tarea"
@@ -382,42 +425,40 @@ def asignar_programador_tarea():
             WHERE id = %s;
         """
 
-        resultado = ejecutar_sql(query, (
-            programador,
-            tarea
+        result = ejecutar_sql(query, (
+            body["programador"],
+            body["tarea"]
         ))
 
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-
-        return jsonify({
-            "programador": programador,
-            "tarea": tarea
-        }), 201
+        return handle_response({
+            "programmer": body["programador"],
+            "task": body["tarea"]
+        }, 201)
 
     except KeyError as e:
-        return jsonify({"error": f"Campo requerido faltante: {str(e)}"}), 400
+        return handle_response(str(e), 400)
     except Exception as e:
-        return jsonify({"error": f"Error al asignar el programador a la tarea: {str(e)}"}), 500
+        return handle_response(f"Error assigning programmer to task: {str(e)}", 500)
 
+
+# Task Retrieval Routes
 @app.route('/api/proyectos/<int:proyecto_id>/tareas', methods=['GET'])
-def obtener_tareas_proyecto(proyecto_id):
+def get_project_tasks(proyecto_id):
     try:
         query = """
                 SELECT t.* 
                 FROM public."Tarea" t
                 WHERE t.proyecto = %s
             """
-        resultado = ejecutar_sql(query, (proyecto_id,))
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-        return jsonify(resultado)
+        result = ejecutar_sql(query, (proyecto_id,))
+        return handle_response(result)
 
     except Exception as e:
-        return jsonify({"error": f"Error al obtener las tareas: {str(e)}"}), 500
+        return handle_response(f"Error fetching tasks: {str(e)}", 500)
+
 
 @app.route('/api/proyectos/<int:proyecto_id>/tareas/asignadas', methods=['GET'])
-def obtener_tareas_asignadas_proyecto(proyecto_id):
+def get_assigned_tasks(proyecto_id):
     try:
         query = """
                 SELECT t.* 
@@ -425,40 +466,40 @@ def obtener_tareas_asignadas_proyecto(proyecto_id):
                 WHERE t.proyecto = %s 
                 AND t.programador IS NOT NULL
             """
-        resultado = ejecutar_sql(query, (proyecto_id,))
-        if isinstance(resultado, tuple):
-            return jsonify(resultado[0]), resultado[1]
-        return jsonify(resultado)
+        result = ejecutar_sql(query, (proyecto_id,))
+        return handle_response(result)
 
     except Exception as e:
-        return jsonify({"error": f"Error al obtener las tareas: {str(e)}"}), 500
+        return handle_response(f"Error fetching tasks: {str(e)}", 500)
+
 
 if __name__ == '__main__':
     app.run(debug=True)
 
 """
-LISTADO DE RUTAS ORGANIZADAS:
+LIST OF ORGANIZED ROUTES:
 
-# Ruta de prueba
+# Test route
 GET /api/test
 
-# Rutas de autenticación
+# Authentication routes
 POST /api/auth/login
 
-# Rutas de empleados
+# Employee routes
 GET /api/empleados
 GET /api/programadores
 
-# Rutas de proyectos
+# Project routes
 GET /api/proyectos
 GET /api/proyectos/activos
 GET /api/proyectos/gestor
+GET /api/proyectos/{proyecto_id}/obtener-programadores
 POST /api/proyectos/crear
 POST /api/proyectos/asignar-gestor
 POST /api/proyectos/asignar-programador
 POST /api/proyectos/modificar-cliente
 
-# Rutas de tareas
+# Task routes
 POST /api/tareas/crear
 POST /api/tareas/asignar-programador
 GET /api/proyectos/{proyecto_id}/tareas
